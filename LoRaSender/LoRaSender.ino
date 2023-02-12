@@ -1,4 +1,4 @@
-//Selected Board: DOIT ESP32 DEVKIT V1
+//DOIT ESP32 DEVKIT V1
 #include "Arduino.h"
 #include <NimBLEDevice.h>
 
@@ -20,19 +20,57 @@ NimBLEUUID bmeVoltWriteCharacteristicsUUID("FFF3");
 //std::string addressVoltcraft = "a3:00:00:00:50:51";
 //std::string addressList[2] = { "d1:E7:4D:02:89:E4", "D9:BB:5B:BA:C8:24" };
 
+
 // Prod im Keller
 std::string addressVoltcraft = "a3:00:00:00:4f:52";
-std::string addressList[2] = {"d2:a2:68:c9:33:35","fc:c8:2d:59:6b:fb" };
+std::string addressList[4] = {"d2:a2:68:c9:33:35","fc:c8:2d:59:6b:fb","e4:e7:35:11:0d:e9","cd:c6:1a:a2:32:fd" };
 
 
-long intervalTempMeasure = 293;  // 5 Minutes
+struct SwitchB {
+  size_t length;
+  //std::string address;
+  uint8_t address[6];
+  uint8_t data[4];
+};
+
+struct VoltCM {
+  size_t length;
+  //std::string address;
+  uint8_t address[6];
+  uint8_t data[20];
+};
+
+struct VoltCD {
+  size_t length;
+  //std::string address;
+  uint8_t address[6];
+  uint8_t data[60];
+};
+
+//SwitchB switchB[3];
+SwitchB switchB[16];
+VoltCM voltCM[10];
+VoltCD voltCD;
+
+uint8_t c_switchB=0;
+uint8_t c_voltCM=0;
+uint8_t c_voltCD=0;
+
+
+
+long intervalTempMeasure = 83;  // 2 Minutes
 long intervalPowerMeasure = 34;    // 30 Seconds
 long intervalPowerDaily = 3600;    // 1 Hour
-//long intervalPowerDaily = 60;  // 1 Hour
 long secondsTempMeasure;
 long secondsPowerMeasure;
 long secondsPowerDaily;
 int bleConnectRetries = 2;  // number of BLE Connect retries
+
+hw_timer_t *timer = NULL; // define Timer Variable
+//uint64_t alarmInterval = (1000000 * 60 * 6); // set Timer to 6 Minutes
+uint64_t alarmInterval = (1000000 * 60 * 3); // set Timer to 6 Minutes
+
+bool doSendLoRa = false;
 
 
 class ClientCallbacks : public NimBLEClientCallbacks {
@@ -90,6 +128,7 @@ void InitBLE() {
 void NotifyCallback(NimBLERemoteCharacteristic* pRemoteCharacteristic,
                     uint8_t* pData, size_t length, bool isNotify) {
 
+  if (doSendLoRa) {return;} // don't process BLE Data during sending LoRa Data
   if (pData[1] == 6 && pData[2] == 0x17 && pData[3] == 0x0) {
     Serial.println("AUTH DAILY NOTIFY");
   } else {
@@ -101,7 +140,7 @@ void NotifyCallback(NimBLERemoteCharacteristic* pRemoteCharacteristic,
     Heltec.display->setFont(ArialMT_Plain_16);
     Heltec.display->clear();
     Heltec.display->display();
-    Heltec.display->drawString(0, 0, "Send LoRa");
+    Heltec.display->drawString(0, 0, "Get BLE Data");
     Heltec.display->display();
     delay(100);
 
@@ -112,42 +151,46 @@ void NotifyCallback(NimBLERemoteCharacteristic* pRemoteCharacteristic,
     Serial.print("pData Size = ");
     Serial.println(length);
 
-    LoRa.beginPacket();
-    LoRa.setTxPower(20, RF_PACONFIG_PASELECT_PABOOST);
-    LoRa.print("address=");
-    LoRa.print(pRemoteCharacteristic->getRemoteService()->getClient()->getPeerAddress().toString().c_str());
-    LoRa.endPacket();
+    if (pData[1] == 0x0f && pData[2] == 0x04) { // Measure Voltcraft
+      Serial.print("VoltCM: ");
+      Serial.println(c_voltCM);
 
-    LoRa.beginPacket();
-    LoRa.print("size=");
-    LoRa.print(length);
-    LoRa.endPacket();
-
-    for (int i = 0; i < length; i = i + 10) {  // sende die LoRa Daten im 10er Block - jedes Byte einzeln dauert zu lange, alles zusammen geht unterwegs verloren
-      int l; 
-      LoRa.beginPacket();
-      LoRa.setTxPower(20, RF_PACONFIG_PASELECT_PABOOST);
-      if (i + 10 < length) {
-        l = i + 10;
-      } else {
-        l = length;
+      for (int i = 0; i < length;i++) {
+        voltCM[c_voltCM].data[i] = pData[i];
       }
-      for (int a = i; a < l; a++) { // send 10 bytes
-        Serial.println(pData[a], HEX);
-        LoRa.write(pData[a]);  // write data as byte instead of char
-      }
-      LoRa.endPacket();
-      delay(1);  // mache nach jedem Block eine kurze Pause, sonst kommt es zu einer Exception - 1ms reicht bereits
+      voltCM[c_voltCM].length = length;
+      memcpy(voltCM[c_voltCM].address, pRemoteCharacteristic->getRemoteService()->getClient()->getPeerAddress().getNative(), 6);
+      c_voltCM++;
     }
-    LoRa.beginPacket();
-    LoRa.print("&END");
-    LoRa.endPacket();
-  
-    Serial.println("Clear Display");
-    Heltec.display->init();
-    Heltec.display->clear();
-    Heltec.display->display();
+
+    if (pData[1] == 0x33 && pData[2] == 0x0a) { // Day Voltcraft
+      Serial.print("VoltCD: ");
+      Serial.println(c_voltCD);
+
+      for (int i = 0; i < length;i++) {
+        voltCD.data[i] = pData[i];
+      }
+      voltCD.length = length;
+      memcpy(voltCD.address, pRemoteCharacteristic->getRemoteService()->getClient()->getPeerAddress().getNative(), 6);
+      c_voltCD++;
+    }
+
+    if (pData[0] == 0x01 && pData[1] >= 0x00 && pData[1] <= 0x09) { // Switchbot Meter (decimal part of temperature value - 0 to 9)
+      Serial.print("SwitchB: ");
+      Serial.println(c_switchB);
+
+      for (int i = 0; i < length;i++) {
+        switchB[c_switchB].data[i] = pData[i];
+      }
+      switchB[c_switchB].length = length;
+      memcpy(switchB[c_switchB].address, pRemoteCharacteristic->getRemoteService()->getClient()->getPeerAddress().getNative(), 6);
+      c_switchB++;
+    }
   }
+  pRemoteCharacteristic->getRemoteService()->getClient()->disconnect(); // required for more than 3 BLE devices. works only with default parameter, BLE_ERR_SUCCESS doesn't seem to work.
+  Heltec.display->clear();
+  Heltec.display->display();
+
 }
 
 
@@ -322,6 +365,17 @@ bool ConnectDevice(NimBLEAddress address, uint8_t mode) {  // mode: 0 = Switchbo
 }
 
 
+void IRAM_ATTR onTimer() {
+  if (c_switchB > 0 && c_voltCM > 0) {
+    doSendLoRa = true; 
+
+  } else {
+    Serial.println("keine Daten in den letzten 5 Minuten");
+    Serial.println("Starte neu...");
+    ESP.restart();
+  }
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -335,9 +389,17 @@ void setup() {
   Heltec.display->flipScreenVertically();
   Heltec.display->setFont(ArialMT_Plain_10);
 
+
+  // IDEE: SENDE LoRa Rquest an "Reciver" und frage nach Datum + Uhrzeit
+
   secondsTempMeasure = intervalTempMeasure;
   secondsPowerMeasure = intervalPowerMeasure;
   secondsPowerDaily = intervalPowerDaily;
+
+  timer = timerBegin(0, 80, true); // initialize Timer on Timer-Number 0. Set divider to 80 for the 80MHz CPU (80 000 000 Hz / 80 = 1 000 000)
+  timerAttachInterrupt(timer, &onTimer, true);
+  timerAlarmWrite(timer, alarmInterval, true);
+  timerAlarmEnable(timer);                                              
 }
 
 void loop() {
@@ -346,7 +408,7 @@ void loop() {
   secondsPowerMeasure += 1;
   secondsPowerDaily += 1;
 
-  if (secondsTempMeasure >= intervalTempMeasure) {
+  if (secondsTempMeasure >= intervalTempMeasure && doSendLoRa == false) { //doSendLoRa == false --> don't get new BLE Data during LoRa Sending
     for (auto address : addressList) {
       bool result = false;
       int counter = 0;
@@ -363,7 +425,7 @@ void loop() {
     secondsTempMeasure = 0;
   }
 
-  if (secondsPowerMeasure >= intervalPowerMeasure) {
+  if (secondsPowerMeasure >= intervalPowerMeasure && doSendLoRa == false) { //doSendLoRa == false --> don't get new BLE Data during LoRa Sending
     bool result = false;
     int counter = 0;
     while (!result && counter <= bleConnectRetries) {
@@ -377,7 +439,7 @@ void loop() {
     secondsPowerMeasure = 0;
   }
 
-  if (secondsPowerDaily >= intervalPowerDaily) {
+  if (secondsPowerDaily >= intervalPowerDaily && doSendLoRa == false) { //doSendLoRa == false --> don't get new BLE Data during LoRa Sending
     Serial.print("BSeconds: ");
     Serial.println(secondsPowerDaily);
 
@@ -393,5 +455,151 @@ void loop() {
     }
     secondsPowerDaily = 0;
   }
+
+if (doSendLoRa) { // send LoRa Data
+    Serial.println("send Data");
+    Heltec.display->init();
+    Heltec.display->clear();
+    Heltec.display->display();
+    Heltec.display->flipScreenVertically();
+    Heltec.display->setFont(ArialMT_Plain_10);
+    Heltec.display->clear();
+    Heltec.display->display();
+    Heltec.display->drawString(0,0, "Send LoRa");
+    Heltec.display->display();
+
+    for (int b = 0; b < c_switchB; b++) {
+      uint16_t checksum=0;
+      Serial.print("SwitchB Address: ");
+      for (int c_address = 0; c_address < 6; c_address++) {
+        Serial.print(switchB[b].address[c_address],HEX);
+        Serial.print("#");
+      }
+      Serial.println("");
+      
+      //LoRa.setSpreadingFactor(6);
+      LoRa.setTxPower(20, RF_PACONFIG_PASELECT_PABOOST);
+      LoRa.beginPacket();
+      LoRa.print("address=");
+      for (int c_address = 0; c_address < 6; c_address++) {
+        LoRa.write(switchB[b].address[c_address]);
+        checksum += switchB[b].address[c_address];
+      }
+      LoRa.endPacket();
+
+      LoRa.beginPacket();
+      LoRa.print("size=");
+      LoRa.print(switchB[b].length+1);
+      LoRa.endPacket();
+
+      LoRa.beginPacket();
+      for (int i = 0; i < switchB[b].length; i++) {  
+        //Serial.print(switchB[b].data[i],HEX);  // write data as byte
+        LoRa.write(switchB[b].data[i]);  // write data as byte
+        checksum += switchB[b].data[i]; // calculate checksum ()
+      }
+      checksum = (checksum & 0xFF); // if the checksum size is larger than 1 byte, it is truncated to 1 byte (bitwise AND)
+      LoRa.write(checksum);  // write cecksum as byte
+      LoRa.endPacket();
+      LoRa.beginPacket();
+      LoRa.print("&DS_END"); // Send Dataset End marker
+      LoRa.endPacket();
+      Serial.print("checksum: ");
+      Serial.println(checksum);
+      delay(1500);  // mache kurze Pause, sonst kommt es zu einer Exception - 1ms reicht bereits
+    }
+    c_switchB = 0;
+
+
+    for (int b = 0; b < c_voltCM; b++) {
+      uint16_t checksum=0;
+      LoRa.beginPacket();
+      LoRa.print("address=");
+      //LoRa.print(voltCM[b].address.c_str());
+      for (int c_address = 0; c_address < 6; c_address++) {
+        LoRa.write(voltCM[b].address[c_address]);
+        checksum += voltCM[b].address[c_address];
+      }
+      LoRa.endPacket();
+
+      LoRa.beginPacket();
+      LoRa.print("size=");
+      LoRa.print(voltCM[b].length+1);
+      LoRa.endPacket();
+
+      LoRa.beginPacket();
+      for (int i = 0; i < voltCM[b].length; i++) {  
+        LoRa.write(voltCM[b].data[i]);  // write data as byte
+        checksum += voltCM[b].data[i];
+      }
+      checksum = (checksum & 0xFF); // if the checksum size is larger than 1 byte, it is truncated to 1 byte (bitwise AND)
+      LoRa.write(checksum);  // write cecksum as byte
+      LoRa.endPacket();
+      LoRa.beginPacket();
+      LoRa.print("&DS_END"); // Send Dataset End marker
+      LoRa.endPacket();
+      delay(1500);  // mache kurze Pause, sonst kommt es zu einer Exception - 1ms reicht bereits
+    }
+    c_voltCM = 0;
+
+
+    if (c_voltCD > 0) {
+      uint16_t checksum=0;
+      LoRa.beginPacket();
+      LoRa.print("address=");
+      //LoRa.print(voltCD.address.c_str());
+      for (int c_address = 0; c_address < 6; c_address++) {
+        LoRa.write(voltCD.address[c_address]);
+        checksum += voltCD.address[c_address];
+      }
+      LoRa.endPacket();
+
+      LoRa.beginPacket();
+      LoRa.print("size=");
+      LoRa.print(voltCD.length+1);
+      LoRa.endPacket();
+
+
+      for (int i = 0; i < voltCD.length; i = i + 10) {  // send LoRa data in a 10 Byte Block - ervery single Byte is to slow, all byte get lost
+        int l;
+        LoRa.beginPacket();
+        if (i + 10 < voltCD.length) {
+          l = i + 10;
+        } else {
+          l = voltCD.length;
+        }
+        for (int a = i; a < l; a++) {
+          //Serial.println(a);
+          Serial.println(voltCD.data[a], HEX);
+          LoRa.write(voltCD.data[a]);  // write data as byte
+          checksum += voltCD.data[a];
+        }
+        LoRa.endPacket();
+        delay(10);  // if we don't wait a little time, we will get an Exception 
+      }
+      checksum = (checksum & 0xFF); // if the checksum size is larger than 1 byte, it is truncated to 1 byte (bitwise AND)
+      Serial.print ("CHECKSUM: ");
+      Serial.println(checksum, HEX);
+      LoRa.beginPacket();
+      LoRa.write(checksum);  // write cecksum as byte
+      LoRa.endPacket();
+      LoRa.beginPacket();
+      LoRa.print("&DS_END"); // Send Dataset End marker
+      LoRa.endPacket();
+      delay(1500);  
+    }
+    c_voltCD = 0;
+    LoRa.beginPacket();
+    LoRa.print("&G_END"); // Send Global End marker
+    LoRa.endPacket();
+
+    Serial.println("Clear Display");
+    Heltec.display->init();
+    Heltec.display->clear();
+    Heltec.display->display();  
+    doSendLoRa = false; 
+    timerWrite (timer, 0); // reset Timer
+  }  
   delay(1000);
+  
 }
